@@ -1,0 +1,27 @@
+# OS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# Playwright runtime/profile artifacts
+.playwright_profile/
+.playwright_profile_main/
+.playwright_profile_fresh_test/
+.playwright_profile_fresh_wait5/
+
+# Project runtime artifacts
+artifacts/
+
+# Local env files
+.env
+.env.*

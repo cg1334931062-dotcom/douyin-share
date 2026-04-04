@@ -1,0 +1,18 @@
+min_len: 8
+max_len: 30
+duplicate_similarity: 0.85
+max_comments_per_hour: 6
+
+banned_words:
+  - 加我
+  - 私信我
+  - 返现
+  - 刷单
+  - 投资稳赚
+  - 赌博
+  - 彩票群
+  - 带你赚钱
+
+manual_approval_required: true
+high_risk_actions:
+  - send_comment
