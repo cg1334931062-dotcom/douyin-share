@@ -75,6 +75,45 @@ COMMENT_PANEL_ITEM_SELECTORS = (
     "[data-e2e*='comment-content']",
 )
 
+COMMENT_OPEN_BUTTON_SELECTORS = (
+    "button:has-text('评论')",
+    "[role='button']:has-text('评论')",
+    "[aria-label*='评论']",
+    "[data-e2e*='comment']",
+)
+
+COMMENT_INPUT_SELECTORS = (
+    "textarea[placeholder*='说点什么']",
+    "textarea[placeholder*='善语结善缘']",
+    "textarea[placeholder*='评论']",
+    "input[placeholder*='说点什么']",
+    "input[placeholder*='写评论']",
+    "input[placeholder*='评论']",
+    "[data-e2e*='comment-input'] textarea",
+    "[data-e2e*='comment-input'] input",
+    "[data-e2e*='comment-input'] [contenteditable]",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']",
+    "[contenteditable='']",
+    "[role='textbox']",
+)
+
+COMMENT_COMPOSER_TRIGGER_SELECTORS = (
+    "text=说点什么",
+    "text=善语结善缘",
+    "text=写评论",
+    "text=发布评论",
+    "[data-e2e*='comment-input']",
+    "[class*='comment'][class*='input']",
+    "[class*='Comment'][class*='Input']",
+    "[class*='input'][class*='comment']",
+)
+
+MENTION_WAIT_BEFORE_SELECT_MS = 900
+MENTION_WAIT_AFTER_SELECT_MS = 700
+MENTION_WAIT_BEFORE_SEND_MS = 550
+MENTION_WAIT_AFTER_SEND_MS = 1300
+
 SHARE_BUTTON_SELECTORS = (
     "[data-e2e*='share']",
     "button:has-text('转发')",
@@ -804,34 +843,142 @@ class PlaywrightBrowserAdapter:
         if self.dry_run_post:
             print(f"[dry-run] comment would be posted: {comment}")
             return True
+        mention_targets = self._extract_mention_targets(comment)
+        has_mention = bool(mention_targets)
+        mention_suffix = self._extract_mention_suffix(comment, mention_targets)
 
-        self._open_comment_panel()
-        box_selectors = (
-            "textarea[placeholder*='说点什么']",
-            "textarea[placeholder*='善语结善缘']",
-            "[contenteditable='true']",
-        )
+        if not self._is_comment_panel_open():
+            self._open_comment_panel()
+        if not self._is_comment_panel_open():
+            print("[post] comment panel not open after X")
+            return False
+
         send_selectors = (
             "button:has-text('发送')",
             "text=发送",
         )
 
-        locator = self._first_visible(box_selectors)
+        locator = self._first_visible_in_region(
+            COMMENT_INPUT_SELECTORS,
+            x1=0.54,
+            x2=1.0,
+            y1=0.56,
+            y2=0.995,
+            max_scan_per_selector=10,
+        )
         if locator is None:
+            locator = self._first_visible(COMMENT_INPUT_SELECTORS)
+        if locator is None:
+            composer_top = self._activate_comment_input_area()
+            if composer_top > 0:
+                posted = self._post_comment_with_keyboard_focus(
+                    comment=comment,
+                    mention_targets=mention_targets,
+                    mention_suffix=mention_suffix,
+                    input_top=composer_top,
+                    send_selectors=send_selectors,
+                )
+                if posted:
+                    return True
+            try:
+                debug_inputs = self._page.evaluate(
+                    """
+                    () => {
+                      const nodes = Array.from(document.querySelectorAll(
+                        "textarea,input,[contenteditable],[role='textbox']"
+                      ));
+                      const visible = [];
+                      for (const el of nodes) {
+                        const rect = el.getBoundingClientRect();
+                        if (!rect || rect.width < 10 || rect.height < 10) continue;
+                        const style = window.getComputedStyle(el);
+                        if (!style || style.display === "none" || style.visibility === "hidden") continue;
+                        if (Number(style.opacity || "1") < 0.2) continue;
+                        if (rect.right < window.innerWidth * 0.50) continue;
+                        const tag = (el.tagName || "").toLowerCase();
+                        const role = el.getAttribute("role") || "";
+                        const ce = el.getAttribute("contenteditable") || "";
+                        const ph = el.getAttribute("placeholder") || "";
+                        const cls = (el.className || "").toString().replace(/\\s+/g, " ").slice(0, 80);
+                        visible.push(
+                          `${tag}|role=${role}|ce=${ce}|ph=${ph}|x=${Math.round(rect.left)},y=${Math.round(rect.top)},w=${Math.round(rect.width)},h=${Math.round(rect.height)}|cls=${cls}`
+                        );
+                      }
+                      return visible.slice(0, 12);
+                    }
+                    """
+                )
+                if debug_inputs:
+                    print("[post] input debug:", " || ".join(str(item) for item in debug_inputs))
+            except Exception:
+                pass
             print("[post] comment input not found")
             return False
 
+        input_top = 0.0
+        tag_name = ""
         try:
             locator.click()
-            tag_name = locator.evaluate("el => el.tagName.toLowerCase()")
-            if tag_name == "textarea":
-                locator.fill(comment)
+            tag_name = str(locator.evaluate("el => (el.tagName || '').toLowerCase()")).strip()
+            box = locator.bounding_box()
+            if box is not None:
+                input_top = float(box["y"])
+            if has_mention:
+                if tag_name in {"textarea", "input"}:
+                    locator.fill("")
+                    mention_ok = self._type_mentions_and_select_candidates(
+                        mention_targets=mention_targets,
+                        input_top=input_top,
+                        type_fn=lambda text: locator.type(text, delay=20),
+                    )
+                else:
+                    self._page.keyboard.press("Meta+A")
+                    self._page.keyboard.press("Backspace")
+                    mention_ok = self._type_mentions_and_select_candidates(
+                        mention_targets=mention_targets,
+                        input_top=input_top,
+                        type_fn=lambda text: self._page.keyboard.type(text, delay=20),
+                    )
+                if not mention_ok:
+                    return False
             else:
-                self._page.keyboard.press("Meta+A")
-                self._page.keyboard.type(comment, delay=20)
+                if tag_name in {"textarea", "input"}:
+                    locator.fill(comment)
+                else:
+                    self._page.keyboard.press("Meta+A")
+                    self._page.keyboard.type(comment, delay=20)
         except Exception:
             print("[post] failed to type comment")
             return False
+
+        if has_mention:
+            if mention_suffix:
+                try:
+                    if tag_name in {"textarea", "input"}:
+                        locator.click()
+                        locator.type(f" {mention_suffix}", delay=20)
+                    else:
+                        self._page.keyboard.type(f" {mention_suffix}", delay=20)
+                except Exception:
+                    print("[post] failed to append mention suffix")
+                    return False
+            self._sleep(MENTION_WAIT_BEFORE_SEND_MS)
+
+        if has_mention:
+            try:
+                self._page.keyboard.press("Enter")
+            except Exception:
+                send_btn = self._first_visible(send_selectors)
+                try:
+                    if send_btn is not None:
+                        send_btn.click()
+                    else:
+                        self._page.keyboard.press("Enter")
+                except Exception:
+                    print("[post] failed to trigger send action")
+                    return False
+            self._sleep(MENTION_WAIT_AFTER_SEND_MS)
+            return True
 
         send_btn = self._first_visible(send_selectors)
         try:
@@ -846,6 +993,313 @@ class PlaywrightBrowserAdapter:
         self._sleep(1800)
         body_text = self._safe_body_text(max_len=4500)
         return comment[:8] in body_text
+
+    def _activate_comment_input_area(self) -> float:
+        locator = self._first_visible_in_region(
+            COMMENT_COMPOSER_TRIGGER_SELECTORS,
+            x1=0.66,
+            x2=1.0,
+            y1=0.82,
+            y2=0.998,
+            max_scan_per_selector=14,
+        )
+        if locator is None:
+            locator = self._first_visible(COMMENT_COMPOSER_TRIGGER_SELECTORS)
+        if locator is not None and self._click_locator_safe(locator, timeout=1600):
+            self._sleep(200)
+            try:
+                box = locator.bounding_box()
+                if box is not None:
+                    return float(box["y"])
+            except Exception:
+                pass
+            return 0.0
+
+        try:
+            clicked_top = self._page.evaluate(
+                """
+                () => {
+                  const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+                  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+                  const minX = vw * 0.66;
+                  const minY = vh * 0.82;
+                  const maxY = vh * 0.998;
+                  const pats = [/说点什么/, /善语结善缘/, /写评论/, /发布评论/];
+                  const norm = (v) => String(v || "").replace(/\\s+/g, " ").trim();
+                  const items = [];
+                  for (const node of Array.from(document.querySelectorAll("div,button,span,p"))) {
+                    if (!node || typeof node.getBoundingClientRect !== "function") continue;
+                    const rect = node.getBoundingClientRect();
+                    if (!rect || rect.width < 24 || rect.height < 12) continue;
+                    if (rect.right < minX || rect.top < minY || rect.bottom > maxY) continue;
+                    const style = window.getComputedStyle(node);
+                    if (!style || style.display === "none" || style.visibility === "hidden") continue;
+                    if (Number(style.opacity || "1") < 0.2) continue;
+                    const text = norm(node.innerText || node.textContent || "");
+                    if (!text || text.length > 28) continue;
+                    if (!pats.some((pat) => pat.test(text))) continue;
+                    const clickable = node.closest("button,[role='button'],[onclick]") || node;
+                    const cRect = clickable.getBoundingClientRect();
+                    items.push({ el: clickable, top: cRect.top, left: cRect.left });
+                  }
+                  items.sort((a, b) => (Math.abs(a.top - b.top) > 6 ? a.top - b.top : a.left - b.left));
+                  if (!items.length) return 0;
+                  items[0].el.click();
+                  return Number(items[0].top || 0);
+                }
+                """
+            )
+            if float(clicked_top or 0) > 0:
+                self._sleep(200)
+                return float(clicked_top)
+        except Exception:
+            pass
+        return 0.0
+
+    def _post_comment_with_keyboard_focus(
+        self,
+        comment: str,
+        mention_targets: tuple[str, ...],
+        mention_suffix: str,
+        input_top: float,
+        send_selectors: tuple[str, ...],
+    ) -> bool:
+        has_mention = bool(mention_targets)
+        if input_top <= 0:
+            return False
+        viewport = self._page.viewport_size or {"width": 1320, "height": 860}
+        width = float(viewport["width"])
+        height = float(viewport["height"])
+        click_x = width * 0.84
+        click_y = min(height * 0.992, max(input_top + 18.0, height * 0.82))
+
+        try:
+            self._page.mouse.click(click_x, click_y, button="left")
+            self._sleep(120)
+            self._page.keyboard.press("Meta+A")
+            self._page.keyboard.press("Backspace")
+            if has_mention:
+                mention_ok = self._type_mentions_and_select_candidates(
+                    mention_targets=mention_targets,
+                    input_top=input_top,
+                    type_fn=lambda text: self._page.keyboard.type(text, delay=20),
+                )
+                if not mention_ok:
+                    return False
+                if mention_suffix:
+                    self._page.keyboard.type(f" {mention_suffix}", delay=20)
+                self._sleep(MENTION_WAIT_BEFORE_SEND_MS)
+            else:
+                self._page.keyboard.type(comment, delay=20)
+                self._sleep(220)
+        except Exception:
+            return False
+
+        if has_mention:
+            try:
+                self._page.keyboard.press("Enter")
+            except Exception:
+                send_btn = self._first_visible(send_selectors)
+                if send_btn is not None:
+                    try:
+                        send_btn.click()
+                    except Exception:
+                        return False
+                else:
+                    return False
+            self._sleep(MENTION_WAIT_AFTER_SEND_MS)
+            return True
+
+        send_btn = self._first_visible(send_selectors)
+        try:
+            if send_btn is not None:
+                send_btn.click()
+            else:
+                self._page.keyboard.press("Enter")
+        except Exception:
+            return False
+        self._sleep(1800)
+        body_text = self._safe_body_text(max_len=4500)
+        return comment[:8] in body_text
+
+    def _extract_mention_targets(self, comment: str) -> tuple[str, ...]:
+        text = " ".join(comment.split()).strip()
+        if "@" not in text:
+            return ()
+        raw_targets = [
+            item.strip()
+            for item in re.findall(r"@([A-Za-z0-9_\u4e00-\u9fff·・-]{1,32})", text)
+            if item.strip()
+        ]
+        targets: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_targets:
+            target = " ".join(raw.split()).strip().lstrip("@")
+            if not target:
+                continue
+            if target in seen:
+                continue
+            seen.add(target)
+            targets.append(target)
+        return tuple(targets)
+
+    def _extract_mention_suffix(self, comment: str, mention_targets: tuple[str, ...]) -> str:
+        text = " ".join(comment.split()).strip()
+        if not text:
+            return ""
+        if not mention_targets:
+            return text
+        stripped = text
+        for target in mention_targets:
+            target_text = " ".join(target.split()).strip().lstrip("@")
+            if not target_text:
+                continue
+            stripped = re.sub(rf"@{re.escape(target_text)}", "", stripped, count=1)
+        return " ".join(stripped.split()).strip()
+
+    def _type_mentions_and_select_candidates(
+        self,
+        mention_targets: tuple[str, ...],
+        input_top: float,
+        type_fn: Any,
+    ) -> bool:
+        if input_top <= 0:
+            return False
+        for idx, target in enumerate(mention_targets):
+            token = f"@{target}" if idx == 0 else f" @{target}"
+            try:
+                type_fn(token)
+            except Exception:
+                return False
+            self._sleep(MENTION_WAIT_BEFORE_SELECT_MS)
+            selected = self._select_first_mention_candidate(
+                mention_target=target,
+                input_top=input_top,
+            )
+            if not selected:
+                self._sleep(320)
+                selected = self._select_first_mention_candidate(
+                    mention_target=target,
+                    input_top=input_top,
+                )
+            if not selected:
+                print(f"[post] mention candidate not selected for @{target}")
+                return False
+            print(f"[post] mention candidate clicked for @{target}")
+            self._sleep(MENTION_WAIT_AFTER_SELECT_MS)
+        return True
+
+    def _select_first_mention_candidate(self, mention_target: str, input_top: float = 0.0) -> bool:
+        target = " ".join(mention_target.split()).strip().lstrip("@")
+        if not target:
+            return True
+        if input_top <= 0:
+            return False
+        try:
+            return bool(
+                self._page.evaluate(
+                    """
+                    (args) => {
+                      const mention = String(args.mention || "").trim().replace(/^@+/, "");
+                      if (!mention) return false;
+                      const inputTop = Number(args.inputTop || 0);
+                      if (!(inputTop > 0)) return false;
+                      const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+                      const minX = vw * 0.68;
+                      const maxX = vw * 0.995;
+                      const minY = Math.max(0, inputTop - 185);
+                      const maxY = Math.max(0, inputTop - 10);
+
+                      const norm = (v) => String(v || "").replace(/\\s+/g, " ").trim();
+                      const isVisible = (el) => {
+                        if (!el || typeof el.getBoundingClientRect !== "function") return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect || rect.width < 18 || rect.height < 14) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style || style.display === "none" || style.visibility === "hidden") return false;
+                        if (Number(style.opacity || "1") < 0.2) return false;
+                        if (rect.right < minX || rect.left > maxX) return false;
+                        if (rect.top < minY || rect.bottom > maxY) return false;
+                        return true;
+                      };
+
+                      const isBadLabel = (text) => {
+                        if (!text) return true;
+                        return (
+                          text === "发送" ||
+                          text === "评论" ||
+                          text.includes("发送给") ||
+                          text.includes("回复")
+                        );
+                      };
+
+                      const uniqueSort = (items) => {
+                        const seen = new Set();
+                        const out = [];
+                        for (const item of items) {
+                          if (seen.has(item.el)) continue;
+                          seen.add(item.el);
+                          out.push(item);
+                        }
+                        out.sort((a, b) => {
+                          if (Math.abs(a.top - b.top) > 6) return a.top - b.top;
+                          return a.left - b.left;
+                        });
+                        return out;
+                      };
+
+                      const tokens = [];
+                      tokens.push(mention);
+                      const prefix3 = mention.slice(0, Math.min(3, mention.length));
+                      const prefix2 = mention.slice(0, Math.min(2, mention.length));
+                      if (prefix3 && !tokens.includes(prefix3)) tokens.push(prefix3);
+                      if (prefix2 && !tokens.includes(prefix2)) tokens.push(prefix2);
+
+                      const pool = Array.from(document.querySelectorAll("button,[role='button'],li,a,div"));
+                      const matches = [];
+                      for (const node of pool) {
+                        const clickable = node.closest("button,[role='button'],li,a,[onclick]") || node;
+                        if (!isVisible(clickable)) continue;
+                        const text = norm(clickable.innerText || clickable.textContent || "");
+                        if (isBadLabel(text)) continue;
+                        if (!tokens.some((tk) => tk && text.includes(tk))) continue;
+                        const rect = clickable.getBoundingClientRect();
+                        const hasAvatar = !!clickable.querySelector("img,[class*='avatar'],[class*='Avatar']");
+                        if (!hasAvatar && text.length > 24) continue;
+                        matches.push({ el: clickable, top: rect.top, left: rect.left, text });
+                      }
+                      const sortedMatches = uniqueSort(matches);
+                      if (sortedMatches.length > 0) {
+                        sortedMatches[0].el.click();
+                        return true;
+                      }
+
+                      // Fallback: click the first avatar-like candidate in mention area.
+                      const fallback = [];
+                      for (const node of pool) {
+                        const clickable = node.closest("button,[role='button'],li,a,[onclick]") || node;
+                        if (!isVisible(clickable)) continue;
+                        const rect = clickable.getBoundingClientRect();
+                        if (rect.width < 34 || rect.height < 34) continue;
+                        const text = norm(clickable.innerText || clickable.textContent || "");
+                        if (isBadLabel(text)) continue;
+                        const hasAvatar = !!clickable.querySelector("img,[class*='avatar'],[class*='Avatar']");
+                        if (!hasAvatar) continue;
+                        fallback.push({ el: clickable, top: rect.top, left: rect.left });
+                      }
+                      const sortedFallback = uniqueSort(fallback);
+                      if (sortedFallback.length > 0) {
+                        sortedFallback[0].el.click();
+                        return true;
+                      }
+                      return false;
+                    }
+                    """,
+                    {"mention": target, "inputTop": input_top},
+                )
+            )
+        except Exception:
+            return False
 
     def share_current_video(self) -> tuple[bool, str, str]:
         self._ensure_started()
@@ -1079,8 +1533,19 @@ class PlaywrightBrowserAdapter:
         return False
 
     def _focus_feed_surface(self) -> None:
-        # Intentionally no-op in lean mode: keep only X and ArrowDown key paths.
-        return
+        try:
+            self._page.evaluate(
+                """
+                () => {
+                  const body = document.body;
+                  if (body && typeof body.focus === 'function') {
+                    body.focus();
+                  }
+                }
+                """
+            )
+        except Exception:
+            pass
 
     def _open_share_panel(self) -> tuple[bool, str]:
         share_btn = self._first_visible_in_region(
@@ -1315,15 +1780,34 @@ class PlaywrightBrowserAdapter:
 
     def _open_comment_panel(self) -> None:
         # User-provided site behavior: X opens the comment drawer.
-        for key in ("x", "X"):
+        for key in ("x", "X", "x"):
             self._blur_active_editor()
+            self._focus_feed_surface()
             try:
                 self._page.keyboard.press(key)
-                self._sleep(750)
+                self._sleep(780)
                 if self._is_comment_panel_open():
                     return
             except Exception:
                 continue
+
+    def _open_comment_panel_via_button(self) -> bool:
+        locator = self._first_visible_in_region(
+            COMMENT_OPEN_BUTTON_SELECTORS,
+            x1=0.70,
+            x2=1.0,
+            y1=0.12,
+            y2=0.98,
+            max_scan_per_selector=12,
+        )
+        if locator is None:
+            locator = self._first_visible(COMMENT_OPEN_BUTTON_SELECTORS)
+        if locator is None:
+            return False
+        if not self._click_locator_safe(locator, timeout=1700):
+            return False
+        self._sleep(650)
+        return self._is_comment_panel_open()
 
     def _first_visible(self, selectors: tuple[str, ...]) -> Any | None:
         for selector in selectors:
@@ -1361,6 +1845,9 @@ class PlaywrightBrowserAdapter:
                   if (editable && typeof el.blur === 'function') {
                     el.blur();
                   }
+                  if (document.body && typeof document.body.focus === 'function') {
+                    document.body.focus();
+                  }
                 }
                 """
             )
@@ -1368,7 +1855,25 @@ class PlaywrightBrowserAdapter:
             pass
 
     def _is_comment_panel_open(self) -> bool:
-        # Require header first so live-chat side panels are not treated as comment drawer.
+        has_strong = self._visible_any_in_region(
+            COMMENT_PANEL_STRONG_SELECTORS,
+            x1=0.54,
+            x2=1.0,
+            y1=0.04,
+            y2=0.98,
+            max_scan_per_selector=8,
+        )
+        if has_strong:
+            return True
+
+        has_items = self._visible_any_in_region(
+            COMMENT_PANEL_ITEM_SELECTORS,
+            x1=0.54,
+            x2=1.0,
+            y1=0.12,
+            y2=0.98,
+            max_scan_per_selector=10,
+        )
         has_header = self._visible_any_in_region(
             COMMENT_PANEL_HEADER_SELECTORS,
             x1=0.54,
@@ -1377,27 +1882,9 @@ class PlaywrightBrowserAdapter:
             y2=0.32,
             max_scan_per_selector=5,
         )
-        if not has_header:
-            return False
-
-        if self._visible_any_in_region(
-            COMMENT_PANEL_STRONG_SELECTORS,
-            x1=0.54,
-            x2=1.0,
-            y1=0.04,
-            y2=0.98,
-            max_scan_per_selector=8,
-        ):
+        if has_header and has_items:
             return True
-
-        return self._visible_any_in_region(
-            COMMENT_PANEL_ITEM_SELECTORS,
-            x1=0.54,
-            x2=1.0,
-            y1=0.12,
-            y2=0.98,
-            max_scan_per_selector=10,
-        )
+        return False
 
     def _is_closed_error(self, exc: Exception) -> bool:
         text = str(exc).lower()

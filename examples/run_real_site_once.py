@@ -473,6 +473,55 @@ def _extract_ranked_engagement_counts(metric_texts: tuple[str, ...]) -> tuple[in
     return like_count, share_count
 
 
+def _normalize_mention_target(raw: str) -> str:
+    cleaned = " ".join(raw.split()).strip()
+    cleaned = cleaned.lstrip("@").strip()
+    return cleaned
+
+
+def _parse_mention_targets(raw: str) -> tuple[str, ...]:
+    text = " ".join(raw.split()).strip()
+    if not text:
+        return ()
+
+    chunks: list[str]
+    if "@" in text:
+        chunks = [
+            item.strip()
+            for item in re.findall(r"@([A-Za-z0-9_\u4e00-\u9fff·・-]{1,32})", text)
+            if item.strip()
+        ]
+    else:
+        chunks = [item for item in re.split(r"[\s,，]+", text) if item]
+
+    targets: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        target = _normalize_mention_target(chunk)
+        if not target:
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        targets.append(target)
+    return tuple(targets)
+
+
+def _compose_mention_comment(base_comment: str, mention_targets: tuple[str, ...]) -> str:
+    body = " ".join(base_comment.split()).strip()
+    targets = tuple(
+        target
+        for target in (_normalize_mention_target(item) for item in mention_targets)
+        if target
+    )
+    if not targets:
+        return body
+    prefix = " ".join(f"@{target}" for target in targets)
+    if body:
+        return f"{prefix} {body}"
+    return f"{prefix} 这条值得看"
+
+
 def _share_level_from_score(score: int) -> str:
     if score >= 85:
         return "强烈推荐分享"
@@ -1196,6 +1245,16 @@ def parse_args() -> argparse.Namespace:
         help="Share target name (friend or group), e.g. '3214抖音群'.",
     )
     parser.add_argument(
+        "--comment-mention-friend",
+        default="",
+        help="When share condition is met, post comment mentioning friend(s), e.g. '@张三 @李四'.",
+    )
+    parser.add_argument(
+        "--comment-without-share",
+        action="store_true",
+        help="Run comment workflow on share-qualified videos even when share action is disabled.",
+    )
+    parser.add_argument(
         "--share-strong-only",
         action="store_true",
         help="Deprecated: share decision now uses engagement metrics (share count / like count).",
@@ -1220,8 +1279,10 @@ def run_scan_mode(
     ai_client: AICommentClient,
     scan_report_csv: str = "",
     enable_share: bool = False,
+    comment_without_share: bool = False,
     share_all: bool = False,
     share_target: str = "",
+    comment_mention_friend: str = "",
     share_strong_only: bool = False,
     runtime_log: RuntimeLogWindow | None = None,
 ) -> int:
@@ -1235,6 +1296,13 @@ def run_scan_mode(
 
     if comment_by_content and not ai_client.enabled:
         print("[scan] AI comment generation disabled; local fallback removed, comments will be skipped.")
+
+    mention_friend_values = _parse_mention_targets(comment_mention_friend)
+    if mention_friend_values:
+        mention_preview = " ".join(f"@{name}" for name in mention_friend_values)
+        print(f"[scan] mention comment enabled for {mention_preview}")
+        if not ai_client.enabled:
+            print("[scan] mention mode requires AI comment; mention comment will be skipped when AI is disabled.")
 
     csv_file = None
     csv_writer: csv.DictWriter | None = None
@@ -1359,6 +1427,7 @@ def run_scan_mode(
             shared_url = snapshot.url
             share_target_value = " ".join(share_target.split()).strip()
             share_message = ""
+            share_message_seed = ""
             draft_comment = ""
             comment_result = "skip"
             comment_source = "-"
@@ -1456,9 +1525,10 @@ def run_scan_mode(
             short_video_confirmed = not live_by_hint
             action = "non_live_wait_then_next"
             should_share = False
+            gate_enabled = enable_share or comment_without_share
 
             if short_video_confirmed:
-                if not enable_share:
+                if not gate_enabled:
                     share_result = "disabled"
                     share_detail = "share_disabled"
                 elif ad_badge:
@@ -1478,8 +1548,11 @@ def run_scan_mode(
                             f"like={engagement_like_count};"
                             f"ratio={engagement_share_ratio:.6f}"
                         )
+                if should_share and not enable_share:
+                    share_result = "disabled"
+                    share_detail = "share_disabled_comment_only"
 
-            if short_video_confirmed and should_share and comment_by_content:
+            if short_video_confirmed and should_share and comment_by_content and gate_enabled:
                 if not panel_open_before:
                     opened = browser.open_comment_panel()
                     pressed_x = True
@@ -1560,9 +1633,14 @@ def run_scan_mode(
                     )
                     if ai_text:
                         draft_comment = ai_text
+                        share_message_seed = ai_text
                         comment_source = "ai"
                         recent_generated_comments = (draft_comment, *recent_generated_comments)[:16]
                         if opened:
+                            draft_comment = _compose_mention_comment(
+                                base_comment=draft_comment,
+                                mention_targets=mention_friend_values,
+                            )
                             # Only send when explicitly enabled. Otherwise keep dry-run style trace.
                             if browser.dry_run_post:
                                 comment_result = "generated_only"
@@ -1593,14 +1671,24 @@ def run_scan_mode(
             else:
                 task_status = "non_live_no_comment_mode"
 
-            if short_video_confirmed and should_share:
+            if (
+                short_video_confirmed
+                and should_share
+                and bool(mention_friend_values)
+                and comment_result in {"skip", "skip_no_comment_mode", "context_not_found", "ai_unavailable"}
+            ):
+                comment_source = "mention"
+                comment_result = "skip_need_ai_comment"
+                task_status = "skip_need_ai_comment"
+
+            if short_video_confirmed and should_share and enable_share:
                 share_triggered = True
                 # Sharing UI works better on feed canvas; close comment drawer first.
                 if browser.is_comment_panel_open():
                     browser.close_comment_panel_if_open()
                     browser.wait_seconds(0.2)
                 if share_target_value:
-                    share_message = draft_comment.strip()
+                    share_message = share_message_seed.strip()
                     ok, detail, shared_url = browser.share_current_video_to_target(
                         target_name=share_target_value,
                         message=share_message,
@@ -1767,8 +1855,10 @@ def main() -> int:
                 ai_client=ai_client,
                 scan_report_csv=args.scan_report_csv,
                 enable_share=args.enable_share,
+                comment_without_share=args.comment_without_share,
                 share_all=args.share_all,
                 share_target=args.share_target,
+                comment_mention_friend=args.comment_mention_friend,
                 share_strong_only=args.share_strong_only,
                 runtime_log=runtime_log,
             )
