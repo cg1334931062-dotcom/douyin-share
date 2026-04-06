@@ -1,9 +1,9 @@
 ---
 name: douyin-scan-share
-description: Use this skill when the user wants to run, validate, or hand off douyin_computer_use_poc in scan/share mode with safe defaults, including login bootstrap, regression rounds, and optional share enablement.
+description: Use this skill when the user wants to run, validate, or hand off “全网找‘屎’专家” in scan/share mode with safe defaults, including login bootstrap, regression rounds, and optional share enablement.
 ---
 
-# Douyin Scan Share Skill
+# 全网找‘屎’专家 Skill
 
 ## When To Use
 

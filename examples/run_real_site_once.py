@@ -58,7 +58,7 @@ def _reader():
 threading.Thread(target=_reader, daemon=True).start()
 
 root = tk.Tk()
-root.title("Douyin Runtime Logs")
+root.title("全网找‘屎’专家 - 运行日志")
 root.geometry("960x560")
 text = ScrolledText(root, wrap=tk.WORD, font=("Menlo", 12))
 text.pack(fill=tk.BOTH, expand=True)

@@ -19,7 +19,7 @@ RUNNER = ROOT / "examples" / "run_real_site_once.py"
 class ScanGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("抖音扫描启动器")
+        self.title("全网找‘屎’专家启动器")
         self.geometry("1020x760")
 
         self.process: subprocess.Popen[str] | None = None

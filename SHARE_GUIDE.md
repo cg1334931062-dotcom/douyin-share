@@ -1,4 +1,6 @@
-# douyin_computer_use_poc 分享指南
+# 全网找‘屎’专家 分享指南
+
+内部兼容名仍为 `douyin_computer_use_poc` / `douyin_agent`。
 
 这个项目目前最适合用三种方式分享给他人：
 

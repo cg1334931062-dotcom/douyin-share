@@ -1,7 +1,7 @@
 [project]
 name = "douyin-computer-use-poc"
 version = "0.1.0"
-description = "Safe-by-default Douyin computer-use proof of concept"
+description = "“全网找‘屎’专家” - safe-by-default Douyin computer-use proof of concept"
 readme = "README.md"
 requires-python = ">=3.11"
 

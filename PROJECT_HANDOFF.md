@@ -1,4 +1,6 @@
-# Douyin Computer Use - Project Handoff (2026-04-04)
+# 全网找‘屎’专家 - Project Handoff (2026-04-04)
+
+Internal compatibility name remains `douyin_computer_use_poc` / `douyin_agent`.
 
 ## 1) Current status
 - Project is in **usable** state for real-site scan/share workflow.
