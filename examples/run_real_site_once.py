@@ -17,6 +17,7 @@ from urllib import request as urlrequest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+DEFAULT_SHARE_RULES_CONFIG = ROOT / "configs" / "share_rules.toml"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
@@ -28,8 +29,13 @@ from douyin_agent import (
     PolicyConfig,
     RunnerConfig,
     SemanticSummary,
+    ShareRuleConfig,
+    detect_promotional_content,
+    evaluate_hard_content_gate,
+    load_share_rule_config,
 )
 from douyin_agent.browser_playwright import PlaywrightBrowserAdapter
+from douyin_agent.browser_playwright import _has_author_ad_text, _has_author_line_without_date
 from douyin_agent.models import ContentSnapshot
 
 
@@ -423,12 +429,13 @@ def _extract_metric_count(text: str, labels: tuple[str, ...]) -> int:
     return max(candidates) if candidates else 0
 
 
-def _should_share_by_engagement(share_count: int, like_count: int) -> tuple[bool, float]:
-    ratio = (share_count / like_count) if like_count > 0 else 0.0
-    if like_count < 1_000:
-        return False, ratio
-    should_share = (share_count > 200_000) or (ratio > 0.5)
-    return should_share, ratio
+def _should_share_by_engagement(
+    share_count: int,
+    like_count: int,
+    rules: ShareRuleConfig,
+) -> tuple[bool, float, str]:
+    decision = rules.evaluate(share_count=share_count, like_count=like_count)
+    return decision.should_share, decision.ratio, decision.detail
 
 
 def _detect_ad_video(text: str, profile: VideoProfileTriplet) -> tuple[bool, str]:
@@ -1245,6 +1252,35 @@ def parse_args() -> argparse.Namespace:
         help="Share target name (friend or group), e.g. '3214抖音群'.",
     )
     parser.add_argument(
+        "--share-rules-config",
+        default=str(DEFAULT_SHARE_RULES_CONFIG),
+        help="Path to TOML file for share-worth evaluation rules.",
+    )
+    parser.add_argument(
+        "--share-min-like-count",
+        type=int,
+        default=None,
+        help="Override min_like_count from share rules config.",
+    )
+    parser.add_argument(
+        "--share-min-share-count",
+        type=int,
+        default=None,
+        help="Override min_share_count from share rules config.",
+    )
+    parser.add_argument(
+        "--share-min-share-like-ratio",
+        type=float,
+        default=None,
+        help="Override min_share_like_ratio from share rules config.",
+    )
+    parser.add_argument(
+        "--share-threshold-mode",
+        choices=("any", "all"),
+        default=None,
+        help="Override threshold_mode from share rules config.",
+    )
+    parser.add_argument(
         "--comment-mention-friend",
         default="",
         help="When share condition is met, post comment mentioning friend(s), e.g. '@张三 @李四'.",
@@ -1282,6 +1318,7 @@ def run_scan_mode(
     comment_without_share: bool = False,
     share_all: bool = False,
     share_target: str = "",
+    share_rules: ShareRuleConfig = ShareRuleConfig(),
     comment_mention_friend: str = "",
     share_strong_only: bool = False,
     runtime_log: RuntimeLogWindow | None = None,
@@ -1296,6 +1333,7 @@ def run_scan_mode(
 
     if comment_by_content and not ai_client.enabled:
         print("[scan] AI comment generation disabled; local fallback removed, comments will be skipped.")
+    print(f"[scan] share_rules={share_rules.describe()}")
 
     mention_friend_values = _parse_mention_targets(comment_mention_friend)
     if mention_friend_values:
@@ -1325,31 +1363,40 @@ def run_scan_mode(
         share_count: int,
         ratio: float,
         task_status: str,
+        comment_result: str,
     ) -> None:
         if runtime_log is None:
             return
-        shared = share_result == "shared"
-        if shared:
-            reason = (
-                f"满足规则(share>20w 或 share/like>0.5), "
-                f"share={share_count}, like={like_count}, ratio={ratio:.3f}, detail={share_detail}"
-            )
-        else:
-            if share_result == "skip_low_engagement":
-                reason = f"未达规则: share={share_count}, like={like_count}, ratio={ratio:.3f}"
-            elif task_status == "live_skipped":
-                reason = "直播内容，跳过分享"
-            elif share_result == "disabled":
-                reason = "未启用分享"
-            else:
-                reason = share_detail if share_detail and share_detail != "-" else share_result
+        del profile
+        del share_detail
 
+        shared = share_result == "shared"
+        comment_generated = comment_result in {"generated_only", "posted"}
+        comment_sent = comment_result == "posted"
+        if share_result == "skip_live" or task_status == "live_skipped":
+            video_type = "直播"
+        elif share_result == "skip_ad":
+            video_type = "广告"
+        else:
+            video_type = "短视频"
+
+        if video_type == "直播":
+            engagement_text = "-"
+        else:
+            engagement_text = (
+                f"点赞={like_count} / 分享={share_count} / 分享点赞比={ratio:.3f}"
+            )
+
+        ai_comment_text = ai_comment if (shared or comment_generated) and ai_comment else "-"
         line = (
-            f"第{round_idx}轮 | AI评论: {ai_comment if ai_comment else '-'} | "
-            f"是否分享: {'是' if shared else '否'} | 原因: {reason} | "
-            f"主题: {' | '.join(profile.themes)} | "
-            f"类型: {' | '.join(profile.types)} | "
-            f"风格: {' | '.join(profile.styles)}"
+            f"当前轮次: {round_idx}/{iterations} | "
+            f"视频类型: {video_type} | "
+            f"互动数据: {engagement_text} | "
+            f"分享/评论生成/评论发送: "
+            f"{'是' if shared else '否'}/"
+            f"{'是' if comment_generated else '否'}/"
+            f"{'是' if comment_sent else '否'} | "
+            f"AI评论: {ai_comment_text}"
         )
         runtime_log.append(line)
 
@@ -1375,12 +1422,34 @@ def run_scan_mode(
             if not focused_context_texts:
                 focused_context_texts = _fallback_context_from_snapshot(snapshot.dom_text, limit=8)
             focused_excerpt = " ".join(focused_context_texts)
+            promo_text_decision = detect_promotional_content(
+                text=f"{snapshot.dom_text} {focused_excerpt}".strip(),
+            )
 
             classification = classifier.classify(snapshot)
             live_by_hint_raw = browser.has_live_room_hint()
             live_by_badge = "直播中" in snapshot.dom_text
-            ad_badge = browser.has_ad_badge()
+            ad_badge_ui = browser.has_ad_badge()
+            ad_badge_text = _has_author_ad_text(
+                (snapshot.dom_text, *raw_context_texts, *focused_context_texts)
+            )
+            ad_badge_no_date = _has_author_line_without_date(
+                (*raw_context_texts, *focused_context_texts)
+            )
+            ad_badge = ad_badge_ui or ad_badge_text or ad_badge_no_date
+            if ad_badge_ui:
+                ad_badge_source = "ui"
+            elif ad_badge_text:
+                ad_badge_source = "author_text"
+            elif ad_badge_no_date:
+                ad_badge_source = "author_no_date"
+            else:
+                ad_badge_source = "-"
             live_by_hint = False if force_non_live else live_by_hint_raw
+            hard_gate = evaluate_hard_content_gate(
+                live_by_hint=live_by_hint,
+                ad_badge=ad_badge,
+            )
 
             profile = _empty_ai_profile()
             video_topic = profile.themes[0]
@@ -1399,7 +1468,7 @@ def run_scan_mode(
                 f"[round {idx + 1}] live_by_hint={live_by_hint}"
                 f"{' (forced false)' if force_non_live else ''} raw={live_by_hint_raw} badge={live_by_badge}"
             )
-            print(f"[round {idx + 1}] ad_badge={ad_badge}")
+            print(f"[round {idx + 1}] ad_badge={ad_badge} source={ad_badge_source}")
             print(
                 f"[round {idx + 1}] start_panel_open={round_start_panel_open} "
                 f"start_panel_closed={round_start_panel_closed}"
@@ -1440,16 +1509,19 @@ def run_scan_mode(
             if engagement_like_count <= 0 and engagement_share_count <= 0:
                 engagement_like_count = _extract_metric_count(snapshot.dom_text, LIKE_COUNT_LABELS)
                 engagement_share_count = _extract_metric_count(snapshot.dom_text, SHARE_COUNT_LABELS)
-            _, engagement_share_ratio = _should_share_by_engagement(
+            _, engagement_share_ratio, engagement_rule_detail = _should_share_by_engagement(
                 share_count=engagement_share_count,
                 like_count=engagement_like_count,
+                rules=share_rules,
             )
             action = ""
             task_status = ""
 
-            if live_by_hint:
+            if hard_gate.blocked and hard_gate.result == "skip_live":
+                share_result = hard_gate.result
+                share_detail = hard_gate.detail
                 action = "wait_live_then_next"
-                task_status = "live_skipped"
+                task_status = hard_gate.task_status
                 print(f"[round {idx + 1}] action=wait_live {live_wait_seconds}s then next")
                 browser.wait_seconds(live_wait_seconds)
                 if idx < iterations - 1:
@@ -1464,7 +1536,83 @@ def run_scan_mode(
                     share_count=engagement_share_count,
                     ratio=engagement_share_ratio,
                     task_status=task_status,
+                    comment_result=comment_result,
                 )
+                _write_round_row(
+                    {
+                        "round": idx + 1,
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "video_id": snapshot.video_id,
+                        "url": snapshot.url,
+                        "classification": classification.kind,
+                        "confidence": f"{classification.confidence:.2f}",
+                        "live_by_hint_raw": str(live_by_hint_raw),
+                        "live_by_hint": str(live_by_hint),
+                        "live_by_badge": str(live_by_badge),
+                        "ad_badge": str(ad_badge),
+                        "start_panel_open": str(round_start_panel_open),
+                        "start_panel_closed": str(round_start_panel_closed),
+                        "focused_context_count": len(focused_context_texts),
+                        "profile_source": profile.source,
+                        "top_themes": " | ".join(profile.themes),
+                        "top_types": " | ".join(profile.types),
+                        "top_styles": " | ".join(profile.styles),
+                        "share_score": profile.share_score,
+                        "share_level": profile.share_level,
+                        "share_reason": profile.share_reason,
+                        "share_worth_share": str(profile.worth_share),
+                        "share_humor_score": profile.humor_score,
+                        "share_funny_score": profile.funny_score,
+                        "share_parody_score": profile.parody_score,
+                        "share_nonsense_score": profile.nonsense_score,
+                        "share_abstract_score": profile.abstract_score,
+                        "engagement_like_count": engagement_like_count,
+                        "engagement_share_count": engagement_share_count,
+                        "engagement_share_like_ratio": f"{engagement_share_ratio:.6f}",
+                        "engagement_metric_texts": " | ".join(engagement_metric_texts),
+                        "video_topic": video_topic,
+                        "video_objects": video_objects,
+                        "action": action,
+                        "task_status": task_status,
+                        "panel_open_before": str(panel_open_before),
+                        "pressed_x": str(pressed_x),
+                        "panel_open_after": str(opened),
+                        "share_enabled": str(share_enabled_flag),
+                        "share_triggered": str(share_triggered),
+                        "share_result": share_result,
+                        "share_detail": share_detail,
+                        "shared_url": shared_url,
+                        "share_target": share_target_value,
+                        "share_message": share_message,
+                        "comment_refs_count": comment_refs_count,
+                        "comment_result": comment_result,
+                        "comment_source": comment_source,
+                        "comment": draft_comment,
+                    }
+                )
+                continue
+
+            if hard_gate.blocked and hard_gate.result == "skip_ad":
+                share_result = hard_gate.result
+                share_detail = hard_gate.detail
+                action = "non_live_wait_then_next"
+                task_status = hard_gate.task_status
+                print(f"[round {idx + 1}] action=skip_ad_hard_block wait_non_live {video_wait_seconds}s then next")
+                _emit_runtime_round_log(
+                    round_idx=idx + 1,
+                    profile=profile,
+                    ai_comment=draft_comment,
+                    share_result=share_result,
+                    share_detail=share_detail,
+                    like_count=engagement_like_count,
+                    share_count=engagement_share_count,
+                    ratio=engagement_share_ratio,
+                    task_status=task_status,
+                    comment_result=comment_result,
+                )
+                browser.wait_seconds(video_wait_seconds)
+                if idx < iterations - 1:
+                    browser.next_item("non_live_wait_done")
                 _write_round_row(
                     {
                         "round": idx + 1,
@@ -1531,23 +1679,20 @@ def run_scan_mode(
                 if not gate_enabled:
                     share_result = "disabled"
                     share_detail = "share_disabled"
-                elif ad_badge:
-                    share_result = "skip_ad"
-                    share_detail = "ad_badge=True;rule=author_badge_only"
+                elif promo_text_decision.blocked:
+                    share_result = "skip_promo"
+                    share_detail = promo_text_decision.detail
                 elif share_all:
                     should_share = True
                 else:
-                    should_share, engagement_share_ratio = _should_share_by_engagement(
+                    should_share, engagement_share_ratio, engagement_rule_detail = _should_share_by_engagement(
                         share_count=engagement_share_count,
                         like_count=engagement_like_count,
+                        rules=share_rules,
                     )
                     if not should_share:
                         share_result = "skip_low_engagement"
-                        share_detail = (
-                            f"share={engagement_share_count};"
-                            f"like={engagement_like_count};"
-                            f"ratio={engagement_share_ratio:.6f}"
-                        )
+                        share_detail = engagement_rule_detail
                 if should_share and not enable_share:
                     share_result = "disabled"
                     share_detail = "share_disabled_comment_only"
@@ -1569,6 +1714,7 @@ def run_scan_mode(
                 comment_refs_count = len(reference_comments)
 
                 analyzed_profile = None
+                promo_profile_blocked = False
                 if focused_excerpt:
                     analyzed_profile = ai_client.analyze_video_profile(
                         content_excerpt=focused_excerpt,
@@ -1586,8 +1732,27 @@ def run_scan_mode(
                         f"share={profile.share_score}({profile.share_level}) "
                         f"worth_share={profile.worth_share}"
                     )
+                    promo_profile_decision = detect_promotional_content(
+                        text=f"{snapshot.dom_text} {focused_excerpt}".strip(),
+                        types=profile.types,
+                        styles=profile.styles,
+                    )
+                    if promo_profile_decision.blocked:
+                        promo_profile_blocked = True
+                        should_share = False
+                        share_result = "skip_promo"
+                        share_detail = promo_profile_decision.detail
+                        comment_source = "promo_guard"
+                        comment_result = "skip_not_share_candidate"
+                        task_status = "skip_promo"
+                        print(
+                            f"[round {idx + 1}] promo_guard_blocked=True "
+                            f"detail={share_detail}"
+                        )
 
-                if not focused_excerpt:
+                if promo_profile_blocked:
+                    pass
+                elif not focused_excerpt:
                     comment_source = "ai"
                     comment_result = "context_not_found"
                     task_status = "context_not_found"
@@ -1662,6 +1827,9 @@ def run_scan_mode(
             elif short_video_confirmed and share_result == "skip_ad":
                 task_status = "skip_ad"
                 comment_result = "skip_not_share_candidate"
+            elif short_video_confirmed and share_result == "skip_promo":
+                task_status = "skip_promo"
+                comment_result = "skip_not_share_candidate"
             elif short_video_confirmed and share_result == "skip_low_engagement":
                 task_status = "skip_low_engagement"
                 comment_result = "skip_not_share_candidate"
@@ -1719,6 +1887,7 @@ def run_scan_mode(
                 share_count=engagement_share_count,
                 ratio=engagement_share_ratio,
                 task_status=task_status,
+                comment_result=comment_result,
             )
             print(
                 f"[round {idx + 1}] action=non_live "
@@ -1801,6 +1970,16 @@ def run_scan_mode(
 
 def main() -> int:
     args = parse_args()
+    try:
+        share_rules = load_share_rule_config(args.share_rules_config).with_overrides(
+            min_like_count=args.share_min_like_count,
+            min_share_count=args.share_min_share_count,
+            min_share_like_ratio=args.share_min_share_like_ratio,
+            threshold_mode=args.share_threshold_mode,
+        )
+    except ValueError as exc:
+        print(f"[config] invalid share rules: {exc}")
+        return 2
 
     classifier = ContentClassifier()
     vision = HeuristicVision()
@@ -1858,6 +2037,7 @@ def main() -> int:
                 comment_without_share=args.comment_without_share,
                 share_all=args.share_all,
                 share_target=args.share_target,
+                share_rules=share_rules,
                 comment_mention_friend=args.comment_mention_friend,
                 share_strong_only=args.share_strong_only,
                 runtime_log=runtime_log,

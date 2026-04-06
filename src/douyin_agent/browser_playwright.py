@@ -204,6 +204,137 @@ SHARE_SEND_SELECTORS = (
 )
 
 
+def _normalize_visible_text(text: str) -> str:
+    return " ".join(str(text).split()).strip()
+
+
+def _in_relative_region(
+    box: dict[str, float],
+    *,
+    width: float,
+    height: float,
+    x1: float,
+    x2: float,
+    y1: float,
+    y2: float,
+) -> bool:
+    cx = box["x"] + box["width"] * 0.5
+    cy = box["y"] + box["height"] * 0.5
+    return (x1 * width) <= cx <= (x2 * width) and (y1 * height) <= cy <= (y2 * height)
+
+
+def _looks_like_author_line_with_ad(text: str) -> bool:
+    normalized = _normalize_visible_text(text)
+    if not normalized or "广告" not in normalized:
+        return False
+    if re.search(r"@[^\s@]{1,40}\s*广告(?:\s|$)", normalized):
+        return True
+    return False
+
+
+def _has_author_ad_text(texts: tuple[str, ...]) -> bool:
+    for text in texts:
+        if _looks_like_author_line_with_ad(text):
+            return True
+    return False
+
+
+def _looks_like_author_line_without_date(text: str) -> bool:
+    normalized = _normalize_visible_text(text)
+    if not normalized.startswith("@"):
+        return False
+    handle_match = re.match(r"^@[^\s@]{1,40}", normalized)
+    if handle_match is None:
+        return False
+    if _looks_like_author_line_with_ad(normalized):
+        return True
+    if re.search(
+        r"(?:·\s*)?(?:\d{1,2}月\d{1,2}日|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}|"
+        r"\d+分钟前|\d+小时前|\d+天前|昨天|前天|今天)",
+        normalized,
+    ):
+        return False
+    remainder = normalized[handle_match.end() :].strip()
+    if len(remainder) < 2:
+        return False
+    return True
+
+
+def _has_author_line_without_date(texts: tuple[str, ...]) -> bool:
+    for text in texts:
+        if _looks_like_author_line_without_date(text):
+            return True
+    return False
+
+
+def _looks_like_standalone_ad_badge(text: str) -> bool:
+    return _normalize_visible_text(text) == "广告"
+
+
+def _looks_like_author_name(text: str, *, source: str) -> bool:
+    normalized = _normalize_visible_text(text)
+    if not normalized or "广告" in normalized:
+        return False
+    if not normalized.startswith("@"):
+        return False
+    if source == "author":
+        return len(normalized) <= 40
+    return len(normalized) <= 40
+
+
+def _same_row(box1: dict[str, float], box2: dict[str, float]) -> bool:
+    cy1 = box1["y"] + box1["height"] * 0.5
+    cy2 = box2["y"] + box2["height"] * 0.5
+    tolerance = max(18.0, box1["height"] * 0.9, box2["height"] * 0.9)
+    return abs(cy1 - cy2) <= tolerance
+
+
+def _badge_is_right_of_author(
+    author_box: dict[str, float],
+    badge_box: dict[str, float],
+) -> bool:
+    author_right = author_box["x"] + author_box["width"]
+    gap = badge_box["x"] - author_right
+    return -10.0 <= gap <= 120.0
+
+
+def _has_author_area_ad_badge(
+    candidates: tuple[tuple[str, dict[str, float], str], ...],
+    *,
+    width: float,
+    height: float,
+) -> bool:
+    author_candidates: list[tuple[str, dict[str, float]]] = []
+    badge_candidates: list[tuple[str, dict[str, float]]] = []
+
+    for text, box, source in candidates:
+        if box is None:
+            continue
+        if box.get("width", 0.0) < 2 or box.get("height", 0.0) < 2:
+            continue
+        if _in_relative_region(
+            box,
+            width=width,
+            height=height,
+            x1=0.0,
+            x2=0.62,
+            y1=0.38,
+            y2=0.99,
+        ):
+            if _looks_like_author_line_with_ad(text):
+                return True
+            if _looks_like_author_name(text, source=source):
+                author_candidates.append((text, box))
+            if _looks_like_standalone_ad_badge(text):
+                badge_candidates.append((text, box))
+
+    for _badge_text, badge_box in badge_candidates:
+        for _author_text, author_box in author_candidates:
+            if _same_row(author_box, badge_box) and _badge_is_right_of_author(author_box, badge_box):
+                return True
+    return False
+
+
 @dataclass
 class PlaywrightBrowserAdapter:
     """
@@ -778,44 +909,168 @@ class PlaywrightBrowserAdapter:
         viewport = self._page.viewport_size or {"width": 1320, "height": 860}
         width = float(viewport["width"])
         height = float(viewport["height"])
+        try:
+            raw = self._page.evaluate(
+                """
+                () => {
+                  const vw = window.innerWidth || document.documentElement.clientWidth || 1320;
+                  const vh = window.innerHeight || document.documentElement.clientHeight || 860;
+                  const out = [];
+                  const seen = new Set();
 
-        def _in_region(box: dict[str, float], x1: float, x2: float, y1: float, y2: float) -> bool:
-            cx = box["x"] + box["width"] * 0.5
-            cy = box["y"] + box["height"] * 0.5
-            return (x1 * width) <= cx <= (x2 * width) and (y1 * height) <= cy <= (y2 * height)
+                  const isVisible = (el) => {
+                    if (!el || !(el instanceof HTMLElement)) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === "none" || style.visibility === "hidden") return false;
+                    if (Number(style.opacity || "1") <= 0.01) return false;
+                    const rect = el.getBoundingClientRect();
+                    return !!rect && rect.width >= 2 && rect.height >= 2;
+                  };
 
-        selectors = (
-            "text=/@[^\\s]{1,40}\\s*广告/",
-            "text=广告",
-            "[data-e2e*='ad']",
-            "[class*='ad']",
-            "[class*='Ad']",
-        )
-        for selector in selectors:
-            try:
-                loc = self._page.locator(selector)
-                count = min(loc.count(), 24)
-            except Exception:
-                continue
-            for idx in range(count):
+                  const inAuthorRegion = (rect) => {
+                    const cx = rect.left + rect.width * 0.5;
+                    const cy = rect.top + rect.height * 0.5;
+                    return cx >= vw * 0.0 && cx <= vw * 0.45 && cy >= vh * 0.72 && cy <= vh * 0.99;
+                  };
+
+                  const normalize = (text) => String(text || "").replace(/\\s+/g, " ").trim();
+
+                  const add = (text, rect, source) => {
+                    const normalized = normalize(text);
+                    if (!normalized) return;
+                    const key = [source, normalized, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)].join("|");
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    out.push({
+                      text: normalized,
+                      x: rect.left,
+                      y: rect.top,
+                      width: rect.width,
+                      height: rect.height,
+                      source,
+                    });
+                  };
+
+                  const authorSelectors = [
+                    "[data-e2e*='author']",
+                    "[data-e2e*='user']",
+                    "[class*='author']",
+                    "a[href*='/user/']",
+                  ];
+
+                  const handleNodes = new Set();
+
+                  for (const selector of authorSelectors) {
+                    let nodes;
+                    try {
+                      nodes = document.querySelectorAll(selector);
+                    } catch (_err) {
+                      continue;
+                    }
+                    const total = Math.min(nodes.length, 24);
+                    for (let i = 0; i < total; i += 1) {
+                      const el = nodes[i];
+                      handleNodes.add(el);
+                    }
+                  }
+
+                  const handleRegex = /@[^\\s@]{1,40}/;
+                  const genericHandleNodes = Array.from(document.querySelectorAll("a, span, div, p, strong, b"));
+                  for (const el of genericHandleNodes) {
+                    const text = normalize(el && (el.innerText || el.textContent || ""));
+                    if (!text || !handleRegex.test(text)) continue;
+                    handleNodes.add(el);
+                    if (handleNodes.size >= 120) break;
+                  }
+
+                  const handleList = Array.from(handleNodes).slice(0, 120);
+                  for (const el of handleList) {
+                      if (!isVisible(el)) continue;
+                      const rect = el.getBoundingClientRect();
+                      if (!inAuthorRegion(rect)) continue;
+
+                      const text = normalize(el.innerText || el.textContent || "");
+                      if (!text) continue;
+                      const handleMatch = text.match(handleRegex);
+                      if (!handleMatch) continue;
+                      if (/@[^\\s@]{1,40}\\s*广告/.test(text)) {
+                        add(text, rect, "ad");
+                      }
+                      add(handleMatch[0], rect, "author");
+
+                      const rowNodes = new Set();
+                      rowNodes.add(el);
+                      if (el.parentElement) {
+                        rowNodes.add(el.parentElement);
+                        for (const child of Array.from(el.parentElement.children)) rowNodes.add(child);
+                      }
+                      if (el.parentElement && el.parentElement.parentElement) {
+                        const gp = el.parentElement.parentElement;
+                        rowNodes.add(gp);
+                        for (const child of Array.from(gp.children)) rowNodes.add(child);
+                      }
+                      if (el.nextElementSibling) rowNodes.add(el.nextElementSibling);
+                      if (el.previousElementSibling) rowNodes.add(el.previousElementSibling);
+
+                      for (const node of rowNodes) {
+                        if (!isVisible(node)) continue;
+                        const nodeRect = node.getBoundingClientRect();
+                        if (!inAuthorRegion(nodeRect)) continue;
+                        const nodeText = normalize(node.innerText || node.textContent || "");
+                        if (!nodeText) continue;
+                        if (nodeText === "广告" || /@[^\\s@]{1,40}\\s*广告/.test(nodeText)) {
+                          add(nodeText, nodeRect, "ad");
+                        }
+                      }
+                    }
+                  }
+
+                  const regionNodes = Array.from(
+                    document.querySelectorAll("a, span, div, p, strong, b, button")
+                  );
+                  for (const el of regionNodes) {
+                    if (!isVisible(el)) continue;
+                    const rect = el.getBoundingClientRect();
+                    if (!inAuthorRegion(rect)) continue;
+                    const text = normalize(el.innerText || el.textContent || "");
+                    if (!text || text.length > 80) continue;
+
+                    const handleMatch = text.match(handleRegex);
+                    if (handleMatch) {
+                      add(handleMatch[0], rect, "author");
+                    }
+                    if (text === "广告" || /@[^\\s@]{1,40}\\s*广告/.test(text)) {
+                      add(text, rect, "ad");
+                    }
+                  }
+
+                  return out.slice(0, 120);
+                }
+                """
+            )
+        except Exception:
+            raw = []
+
+        candidates: list[tuple[str, dict[str, float], str]] = []
+        if isinstance(raw, list):
+            for item in raw[:120]:
+                if not isinstance(item, dict):
+                    continue
+                text = _normalize_visible_text(str(item.get("text", "")))
+                source = _normalize_visible_text(str(item.get("source", ""))) or "generic"
                 try:
-                    item = loc.nth(idx)
-                    if not item.is_visible():
-                        continue
-                    text = " ".join((item.inner_text(timeout=300) or "").split())
-                    if "广告" not in text:
-                        continue
-                    box = item.bounding_box()
-                    if box is None:
-                        continue
+                    box = {
+                        "x": float(item.get("x", 0.0)),
+                        "y": float(item.get("y", 0.0)),
+                        "width": float(item.get("width", 0.0)),
+                        "height": float(item.get("height", 0.0)),
+                    }
                 except Exception:
                     continue
+                if text:
+                    candidates.append((text, box, source))
 
-                # User rule: ad is valid only when author area shows the "广告" tag.
-                # We therefore only accept ad-text in lower-left metadata region.
-                if _in_region(box, 0.02, 0.50, 0.52, 0.99):
-                    return True
-        return False
+        return _has_author_area_ad_badge(tuple(candidates), width=width, height=height)
 
     def capture_frames(self, snapshot: ContentSnapshot) -> tuple[str, ...]:
         self._ensure_started()

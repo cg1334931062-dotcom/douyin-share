@@ -1,6 +1,6 @@
 # 全网找‘屎’专家
 
-一个“安全优先、可回归”的抖音自动化 PoC，主要用于从推荐流里筛出适合转给好友的搞笑 / 怪诞 / 幽默视频，并半自动完成评论与分享。内部兼容名仍为 `douyin_computer_use_poc` / `douyin_agent`。  
+一个“安全优先、可回归”的抖音自动化 PoC，主要用于从推荐流里筛出适合转给好友的搞笑 / 怪诞 / 幽默视频，并半自动完成评论与分享。内部 Python 模块兼容名仍为 `douyin_agent`。  
 主入口是 `examples/run_real_site_once.py --mode scan`，核心目标是稳定跑通：
 
 1. 直播/非直播识别
@@ -36,7 +36,13 @@
 ### 3.1 广告过滤规则
 
 - 仅 `author-area ad badge`（`广告`）作为广告判定依据
-- 命中广告直接不分享（`share_result=skip_ad`）
+- 命中广告直接硬拦截，不评论、不提及、不分享（`share_result=skip_ad`）
+- 额外兜底：若文本或 AI 内容画像命中明显推广/带货信号，也会跳过（`share_result=skip_promo`）
+
+### 3.1.1 直播硬规则
+
+- 沿用原有直播判定逻辑；命中后直接硬拦截，不评论、不提及、不分享
+- 不额外引入分类器或普通 DOM 文本的新增直播判定条件
 
 ### 3.2 分享判定规则
 
@@ -46,7 +52,9 @@
 - `share_count`（转发数）
 - `ratio = share_count / like_count`
 
-规则：
+默认规则来自 `configs/share_rules.toml`，GUI 会读取这份配置，CLI 也可用参数覆盖。
+
+当前默认值：
 
 - `like_count < 1000` 时不分享
 - 否则满足任一条件可分享：
@@ -77,7 +85,7 @@
 ├── tests/                            # 单元测试
 ├── PROJECT_HANDOFF.md                # 当前业务规则与交接说明（重要）
 ├── SHARE_GUIDE.md                    # 对外分享建议
-└── skills/douyin-scan-share/         # Skill 模板
+└── skills/quanwang-zhao-shi-zhuanjia/ # Skill 模板
 ```
 
 ## 5. 环境准备
@@ -91,7 +99,7 @@
 安装：
 
 ```bash
-cd /Users/elewave/Desktop/CLI_Folder/douyin_computer_use_poc
+cd /Users/elewave/Desktop/CLI_Folder/quanwang_zhao_shi_zhuanjia
 python3 -m pip install -e .
 python3 -m pip install playwright
 python3 -m playwright install chromium
@@ -118,7 +126,7 @@ python3 -m playwright install chromium
 使用方式（Windows PowerShell）：
 
 ```powershell
-cd <your-repo>\douyin_computer_use_poc
+cd <your-repo>\quanwang_zhao_shi_zhuanjia
 .\tools\install_windows_oneclick.ps1
 ```
 
@@ -159,7 +167,7 @@ GUI 是这个项目最适合日常使用的入口，适合“找搞笑视频 -> 
 
 界面提供：
 
-- 中文参数面板（轮次、等待、profile、LLM、分享目标等）
+- 中文参数面板（轮次、等待、profile、LLM、分享目标、分享阈值等）
 - `开始扫描` / `停止`
 - `复制命令`（把当前 GUI 配置转成 CLI 命令）
 - 实时日志窗口，方便看登录、每轮判断、评论结果和分享结果
@@ -251,7 +259,7 @@ GUI 是这个项目最适合日常使用的入口，适合“找搞笑视频 -> 
 
 - `[login] ...`：登录等待、登录成功或登录超时
 - `[round N] ...`：每一轮的视频判断结果
-- `share_result=shared|skip_low_engagement|skip_ad|disabled`：分享是否发生，以及为什么没发生
+- `share_result=shared|skip_live|skip_low_engagement|skip_ad|skip_promo|disabled`：分享是否发生，以及为什么没发生
 - `comment_result=generated_only|posted|post_failed|panel_not_open`：评论是只生成了、真实发出了，还是失败了
 - `[gui] 启动命令: ...`：当前 GUI 配置对应的 CLI 命令，可直接复现问题
 
@@ -391,6 +399,11 @@ OPENAI_API_KEY="<YOUR_KEY>" python3 examples/run_real_site_once.py \
 
 - `--enable-share`: 真实分享开关
 - `--share-target`: 目标好友/群名（填写后走“分享给指定对象”路径）
+- `--share-rules-config`: 分享判定规则配置文件，默认 `configs/share_rules.toml`
+- `--share-min-like-count`: 覆盖最少点赞数门槛
+- `--share-min-share-count`: 覆盖最少转发数门槛
+- `--share-min-share-like-ratio`: 覆盖最少转赞比门槛
+- `--share-threshold-mode`: 判定模式，`any` 表示命中任一条件，`all` 表示必须全部满足
 - `--share-all`: 非直播全部分享（绕过分享评估，慎用）
 - `--comment-without-share`: 分享关掉时仍在“命中分享条件的视频”执行评论链路
 
@@ -407,6 +420,8 @@ OPENAI_API_KEY="<YOUR_KEY>" python3 examples/run_real_site_once.py \
 - `share_failed`: 分享动作执行失败
 - `skip_low_engagement`: 未通过互动量门槛
 - `skip_ad`: 广告卡片被过滤
+- `skip_live`: 直播内容被硬拦截
+- `skip_promo`: 疑似推广/带货内容被过滤
 - `disabled`: 当前未启用分享或仅评论模式
 
 常见 `task_status`：
@@ -464,6 +479,6 @@ pytest -q
 
 - 交接与业务规则：`PROJECT_HANDOFF.md`
 - 分享方式建议：`SHARE_GUIDE.md`
-- Skill 模板：`skills/douyin-scan-share/SKILL.md`
+- Skill 模板：`skills/quanwang-zhao-shi-zhuanjia/SKILL.md`
 
 如果在新会话让 AI 按既有规则执行，建议先让它读取 `PROJECT_HANDOFF.md`。

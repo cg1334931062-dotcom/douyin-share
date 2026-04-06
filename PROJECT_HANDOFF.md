@@ -1,6 +1,6 @@
 # 全网找‘屎’专家 - Project Handoff (2026-04-04)
 
-Internal compatibility name remains `douyin_computer_use_poc` / `douyin_agent`.
+Internal Python module compatibility name remains `douyin_agent`.
 
 ## 1) Current status
 - Project is in **usable** state for real-site scan/share workflow.
@@ -21,17 +21,35 @@ For each feed item, in scan mode:
 
 ### 3.1 Ad rule
 - **Only** `author-area ad badge` (`广告`) means ad.
-- Share decision uses `ad_badge` only.
+- Share/comment decision uses `ad_badge` as a hard block.
 - Current share detail for ad skip: `ad_badge=True;rule=author_badge_only`.
+- Additional safety fallback:
+  - if text or AI profile shows clear promo / commerce signals, skip with `share_result=skip_promo`
+
+### 3.1.1 Live hard rule
+- Live content is a hard block:
+  - do **not** comment
+  - do **not** mention friends
+  - do **not** share
+- Hard block follows the original live decision path already used in scan mode.
 - Code:
   - `src/douyin_agent/browser_playwright.py` -> `has_ad_badge` (lower-left author metadata region)
+  - `src/douyin_agent/promo_filter.py`
   - `examples/run_real_site_once.py` around share decision (`elif ad_badge:`)
 
 ### 3.2 Share rule
-- Engagement decision:
+- Engagement decision is now configurable via `configs/share_rules.toml`.
+- Default rule:
   - If `like_count < 1000` => **never share**
   - Else share when: `share_count > 200000` OR `(share_count / like_count) > 0.5`
-- Code: `examples/run_real_site_once.py` -> `_should_share_by_engagement`
+- CLI overrides:
+  - `--share-min-like-count`
+  - `--share-min-share-count`
+  - `--share-min-share-like-ratio`
+  - `--share-threshold-mode`
+- Code:
+  - `src/douyin_agent/share_rules.py`
+  - `examples/run_real_site_once.py` -> `_should_share_by_engagement`
 
 ### 3.3 AI trigger rule
 - Non-live videos that do **not** pass share gating:
@@ -66,7 +84,7 @@ For each feed item, in scan mode:
 
 ## 5.1 Standard real-site scan (100 rounds)
 ```bash
-cd /Users/elewave/Desktop/CLI_Folder/douyin_computer_use_poc
+cd /Users/elewave/Desktop/CLI_Folder/quanwang_zhao_shi_zhuanjia
 OPENAI_API_KEY='<YOUR_KEY>' PYTHONUNBUFFERED=1 python3 examples/run_real_site_once.py \
   --mode scan \
   --iterations 100 \
@@ -91,7 +109,7 @@ OPENAI_API_KEY='<YOUR_KEY>' PYTHONUNBUFFERED=1 python3 examples/run_real_site_on
 
 ## 5.2 Long smoke (1000 rounds)
 ```bash
-cd /Users/elewave/Desktop/CLI_Folder/douyin_computer_use_poc
+cd /Users/elewave/Desktop/CLI_Folder/quanwang_zhao_shi_zhuanjia
 OPENAI_API_KEY='<YOUR_KEY>' PYTHONUNBUFFERED=1 python3 examples/run_real_site_once.py \
   --mode scan \
   --iterations 1000 \
@@ -116,6 +134,8 @@ OPENAI_API_KEY='<YOUR_KEY>' PYTHONUNBUFFERED=1 python3 examples/run_real_site_on
 
 ## 6) Where to edit when requirements change
 - Share threshold / floor:
+  - `configs/share_rules.toml`
+  - `src/douyin_agent/share_rules.py`
   - `examples/run_real_site_once.py` -> `_should_share_by_engagement`
 - Ad filtering:
   - `src/douyin_agent/browser_playwright.py` -> `has_ad_badge`
@@ -151,6 +171,6 @@ OPENAI_API_KEY='<YOUR_KEY>' PYTHONUNBUFFERED=1 python3 examples/run_real_site_on
 When opening a new Codex conversation, first say:
 
 ```text
-请先读取 /Users/elewave/Desktop/CLI_Folder/douyin_computer_use_poc/PROJECT_HANDOFF.md，
+请先读取 /Users/elewave/Desktop/CLI_Folder/quanwang_zhao_shi_zhuanjia/PROJECT_HANDOFF.md，
 按其中“Active business rules”执行，不要改动规则，先跑 10 轮真站回归并汇报关键日志结果。
 ```

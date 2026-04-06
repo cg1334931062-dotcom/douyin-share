@@ -13,7 +13,14 @@ from tkinter.scrolledtext import ScrolledText
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from douyin_agent import ShareRuleConfig, load_share_rule_config
+
 RUNNER = ROOT / "examples" / "run_real_site_once.py"
+DEFAULT_SHARE_RULES_CONFIG = ROOT / "configs" / "share_rules.toml"
 
 
 class ScanGui(tk.Tk):
@@ -24,6 +31,7 @@ class ScanGui(tk.Tk):
 
         self.process: subprocess.Popen[str] | None = None
         self.output_queue: queue.Queue[str | None] = queue.Queue()
+        share_rules = self._load_share_rules()
 
         self.iterations_var = tk.StringVar(value="20")
         self.profile_dir_var = tk.StringVar(value=".playwright_profile_main")
@@ -33,7 +41,17 @@ class ScanGui(tk.Tk):
         self.post_next_settle_var = tk.StringVar(value="8")
         self.snapshot_settle_var = tk.StringVar(value="2")
         self.share_target_var = tk.StringVar(value="")
+        self.share_min_like_var = tk.StringVar(value=str(share_rules.min_like_count))
+        self.share_min_share_var = tk.StringVar(value=str(share_rules.min_share_count))
+        self.share_min_ratio_var = tk.StringVar(value=f"{share_rules.min_share_like_ratio:g}")
         self.comment_mention_friend_var = tk.StringVar(value="")
+        self.share_threshold_mode_options = {
+            "满足任一条件": "any",
+            "满足全部条件": "all",
+        }
+        self.share_threshold_mode_var = tk.StringVar(
+            value=self._threshold_mode_label(share_rules.threshold_mode)
+        )
         self.comment_style_options = {
             "幽默": "humorous",
             "中性": "neutral",
@@ -74,9 +92,22 @@ class ScanGui(tk.Tk):
         self._add_entry(form, "下滑后稳定秒数", self.post_next_settle_var, 2, 2)
         self._add_entry(form, "截图前稳定秒数", self.snapshot_settle_var, 3, 0)
         self._add_entry(form, "分享目标", self.share_target_var, 3, 2, width=38)
-        self._add_entry(form, "评论好友（逗号分隔，@+AI）", self.comment_mention_friend_var, 4, 2, width=30)
+        self._add_entry(form, "最少点赞数", self.share_min_like_var, 4, 0)
+        self._add_entry(form, "最少转发数", self.share_min_share_var, 4, 2)
+        self._add_entry(form, "最少转赞比", self.share_min_ratio_var, 5, 0)
+        self._add_entry(form, "评论好友（逗号分隔，@+AI）", self.comment_mention_friend_var, 6, 2, width=30)
 
-        ttk.Label(form, text="评论风格").grid(row=4, column=0, sticky=tk.W, pady=(8, 4))
+        ttk.Label(form, text="分享判定模式").grid(row=5, column=2, sticky=tk.W, pady=(8, 4))
+        share_mode_box = ttk.Combobox(
+            form,
+            textvariable=self.share_threshold_mode_var,
+            values=tuple(self.share_threshold_mode_options.keys()),
+            state="readonly",
+            width=22,
+        )
+        share_mode_box.grid(row=5, column=3, sticky=tk.W, pady=(8, 4))
+
+        ttk.Label(form, text="评论风格").grid(row=6, column=0, sticky=tk.W, pady=(8, 4))
         style_box = ttk.Combobox(
             form,
             textvariable=self.comment_style_var,
@@ -84,12 +115,12 @@ class ScanGui(tk.Tk):
             state="readonly",
             width=22,
         )
-        style_box.grid(row=4, column=1, sticky=tk.W, pady=(8, 4))
+        style_box.grid(row=6, column=1, sticky=tk.W, pady=(8, 4))
 
-        self._add_entry(form, "LLM 接口地址", self.llm_api_base_var, 5, 0, width=42)
-        self._add_entry(form, "LLM 模型", self.llm_model_var, 5, 2, width=26)
-        self._add_entry(form, "API Key 环境变量", self.llm_api_key_env_var, 6, 0)
-        self._add_entry(form, "API Key 明文（可选）", self.llm_api_key_var, 6, 2, width=38, show="*")
+        self._add_entry(form, "LLM 接口地址", self.llm_api_base_var, 7, 0, width=42)
+        self._add_entry(form, "LLM 模型", self.llm_model_var, 7, 2, width=26)
+        self._add_entry(form, "API Key 环境变量", self.llm_api_key_env_var, 8, 0)
+        self._add_entry(form, "API Key 明文（可选）", self.llm_api_key_var, 8, 2, width=38, show="*")
 
         flags = ttk.Frame(container)
         flags.pack(fill=tk.X, pady=(8, 10))
@@ -148,6 +179,24 @@ class ScanGui(tk.Tk):
             raise ValueError(f"{name}必须是有效的{num_type}") from exc
         if parsed <= 0:
             raise ValueError(f"{name}必须大于 0")
+        return parsed
+
+    def _read_non_negative_number(
+        self,
+        name: str,
+        raw: str,
+        cast: type[int] | type[float],
+    ) -> int | float:
+        value = raw.strip()
+        if not value:
+            raise ValueError(f"{name}不能为空")
+        try:
+            parsed = cast(value)
+        except ValueError as exc:
+            num_type = "整数" if cast is int else "数字"
+            raise ValueError(f"{name}必须是有效的{num_type}") from exc
+        if parsed < 0:
+            raise ValueError(f"{name}必须大于等于 0")
         return parsed
 
     def _normalize_mention_friends(self, raw: str) -> str:
@@ -213,6 +262,18 @@ class ScanGui(tk.Tk):
         deepseek_key = dotenv.get("DEEPSEEK_API_KEY", "").strip()
         return deepseek_key
 
+    def _load_share_rules(self) -> ShareRuleConfig:
+        try:
+            return load_share_rule_config(DEFAULT_SHARE_RULES_CONFIG)
+        except ValueError:
+            return ShareRuleConfig()
+
+    def _threshold_mode_label(self, value: str) -> str:
+        for label, raw in self.share_threshold_mode_options.items():
+            if raw == value:
+                return label
+        return "满足任一条件"
+
     def _build_command(self) -> list[str]:
         iterations = self._read_number("扫描轮数", self.iterations_var.get(), int)
         wait_scale = self._read_number("等待倍率", self.wait_scale_var.get(), float)
@@ -220,6 +281,14 @@ class ScanGui(tk.Tk):
         video_wait = self._read_number("视频停留秒数", self.video_wait_var.get(), float)
         post_next_settle = self._read_number("下滑后稳定秒数", self.post_next_settle_var.get(), float)
         snapshot_settle = self._read_number("截图前稳定秒数", self.snapshot_settle_var.get(), float)
+        share_min_like = self._read_non_negative_number("最少点赞数", self.share_min_like_var.get(), int)
+        share_min_share = self._read_non_negative_number("最少转发数", self.share_min_share_var.get(), int)
+        share_min_ratio = self._read_non_negative_number("最少转赞比", self.share_min_ratio_var.get(), float)
+        share_threshold_mode_key = self.share_threshold_mode_var.get().strip()
+        share_threshold_mode = self.share_threshold_mode_options.get(
+            share_threshold_mode_key,
+            "any",
+        )
         comment_style_key = self.comment_style_var.get().strip()
         comment_style = self.comment_style_options.get(comment_style_key, comment_style_key or "humorous")
         if comment_style not in {"humorous", "neutral"}:
@@ -250,6 +319,16 @@ class ScanGui(tk.Tk):
             str(snapshot_settle),
             "--comment-style",
             comment_style,
+            "--share-rules-config",
+            str(DEFAULT_SHARE_RULES_CONFIG),
+            "--share-min-like-count",
+            str(int(share_min_like)),
+            "--share-min-share-count",
+            str(int(share_min_share)),
+            "--share-min-share-like-ratio",
+            str(share_min_ratio),
+            "--share-threshold-mode",
+            share_threshold_mode,
         ]
 
         if self.require_login_var.get():

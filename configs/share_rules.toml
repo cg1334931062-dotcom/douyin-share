@@ -1,0 +1,6 @@
+min_like_count = 1000
+min_share_count = 200000
+min_share_like_ratio = 0.5
+share_count_enabled = true
+share_like_ratio_enabled = true
+threshold_mode = "any"
