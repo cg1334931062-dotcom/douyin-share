@@ -1,5 +1,5 @@
 ---
-name: douyin-scan-share
+name: quanwang-zhao-shi-zhuanjia
 description: Use this skill when the user wants to run, validate, or hand off “全网找‘屎’专家” in scan/share mode with safe defaults, including login bootstrap, regression rounds, and optional share enablement.
 ---
 
@@ -14,7 +14,7 @@ Use this skill when the user asks to:
 - troubleshoot scan-mode execution without changing business rules
 
 Project root expected:
-- `/Users/elewave/Desktop/CLI_Folder/douyin_computer_use_poc`
+- `/Users/elewave/Desktop/CLI_Folder/quanwang_zhao_shi_zhuanjia`
 
 If root differs, detect it first and adapt all commands.
 

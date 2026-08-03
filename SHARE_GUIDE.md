@@ -1,6 +1,6 @@
 # 全网找‘屎’专家 分享指南
 
-内部兼容名仍为 `douyin_computer_use_poc` / `douyin_agent`。
+内部 Python 模块兼容名仍为 `douyin_agent`。
 
 这个项目目前最适合用三种方式分享给他人：
 
@@ -12,8 +12,8 @@
 
 ### 给使用者的最小步骤
 ```bash
-git clone <你的仓库地址> douyin_computer_use_poc
-cd douyin_computer_use_poc
+git clone <你的仓库地址> quanwang_zhao_shi_zhuanjia
+cd quanwang_zhao_shi_zhuanjia
 python3 -m pip install -e .
 python3 -m pip install playwright
 python3 -m playwright install chromium
@@ -61,16 +61,16 @@ OPENAI_API_KEY='<YOUR_KEY>' python3 examples/run_real_site_once.py \
 ## 2) 总结为 Skill（适合 Codex / Agent 协作）
 
 仓库已提供 Skill 模板：
-- `skills/douyin-scan-share/SKILL.md`
+- `skills/quanwang-zhao-shi-zhuanjia/SKILL.md`
 
 使用者安装方式（示例）：
 ```bash
 mkdir -p ~/.codex/skills
-cp -R skills/douyin-scan-share ~/.codex/skills/
+cp -R skills/quanwang-zhao-shi-zhuanjia ~/.codex/skills/
 ```
 
 之后可在对话中直接说：
-- “用 douyin-scan-share skill 跑 10 轮 scan 回归”
+- “用 quanwang-zhao-shi-zhuanjia skill 跑 10 轮 scan 回归”
 - “先 login-only，再跑 scan，开启 AI 评论但不开启分享”
 
 ## 3) 简单 GUI 启动器（适合非命令行用户）
