@@ -438,6 +438,51 @@ def _should_share_by_engagement(
     return decision.should_share, decision.ratio, decision.detail
 
 
+def format_runtime_round_log(
+    *,
+    round_idx: int,
+    total_iterations: int,
+    ai_comment: str,
+    share_result: str,
+    share_detail: str,
+    like_count: int,
+    share_count: int,
+    ratio: float,
+    task_status: str,
+    comment_result: str,
+) -> str:
+    """Format one runtime status line with the safety decision reason."""
+    shared = share_result == "shared"
+    comment_generated = comment_result in {"generated_only", "posted"}
+    comment_sent = comment_result == "posted"
+    if share_result == "skip_live" or task_status == "live_skipped":
+        video_type = "直播"
+        engagement_text = "-"
+    else:
+        engagement_text = f"点赞={like_count} / 分享={share_count} / 分享点赞比={ratio:.3f}"
+        if share_result == "skip_ad":
+            video_type = "广告"
+        elif share_result == "skip_promo":
+            video_type = "推广内容"
+        else:
+            video_type = "短视频"
+
+    ai_comment_text = ai_comment if (shared or comment_generated) and ai_comment else "-"
+    safety_reason = share_detail if share_detail and share_detail != "-" else "-"
+    return (
+        f"当前轮次: {round_idx}/{total_iterations} | "
+        f"视频类型: {video_type} | "
+        f"互动数据: {engagement_text} | "
+        f"安全门: {share_result} ({safety_reason}) | "
+        f"任务状态: {task_status or '-'} | "
+        f"分享/评论生成/评论发送: "
+        f"{'是' if shared else '否'}/"
+        f"{'是' if comment_generated else '否'}/"
+        f"{'是' if comment_sent else '否'} | "
+        f"AI评论: {ai_comment_text}"
+    )
+
+
 def _detect_ad_video(text: str, profile: VideoProfileTriplet) -> tuple[bool, str]:
     del profile  # Reserved for compatibility; ad decision now uses explicit badge-like text only.
     normalized = " ".join(text.split())
@@ -1368,35 +1413,17 @@ def run_scan_mode(
         if runtime_log is None:
             return
         del profile
-        del share_detail
-
-        shared = share_result == "shared"
-        comment_generated = comment_result in {"generated_only", "posted"}
-        comment_sent = comment_result == "posted"
-        if share_result == "skip_live" or task_status == "live_skipped":
-            video_type = "直播"
-        elif share_result == "skip_ad":
-            video_type = "广告"
-        else:
-            video_type = "短视频"
-
-        if video_type == "直播":
-            engagement_text = "-"
-        else:
-            engagement_text = (
-                f"点赞={like_count} / 分享={share_count} / 分享点赞比={ratio:.3f}"
-            )
-
-        ai_comment_text = ai_comment if (shared or comment_generated) and ai_comment else "-"
-        line = (
-            f"当前轮次: {round_idx}/{iterations} | "
-            f"视频类型: {video_type} | "
-            f"互动数据: {engagement_text} | "
-            f"分享/评论生成/评论发送: "
-            f"{'是' if shared else '否'}/"
-            f"{'是' if comment_generated else '否'}/"
-            f"{'是' if comment_sent else '否'} | "
-            f"AI评论: {ai_comment_text}"
+        line = format_runtime_round_log(
+            round_idx=round_idx,
+            total_iterations=iterations,
+            ai_comment=ai_comment,
+            share_result=share_result,
+            share_detail=share_detail,
+            like_count=like_count,
+            share_count=share_count,
+            ratio=ratio,
+            task_status=task_status,
+            comment_result=comment_result,
         )
         runtime_log.append(line)
 
@@ -1449,6 +1476,7 @@ def run_scan_mode(
             hard_gate = evaluate_hard_content_gate(
                 live_by_hint=live_by_hint,
                 ad_badge=ad_badge,
+                live_by_badge=live_by_badge,
             )
 
             profile = _empty_ai_profile()

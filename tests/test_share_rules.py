@@ -61,3 +61,26 @@ def test_load_share_rule_config_supports_custom_thresholds(tmp_path) -> None:
 def test_share_rule_requires_one_enabled_check() -> None:
     with pytest.raises(ValueError, match="at least one share rule must be enabled"):
         ShareRuleConfig(share_count_enabled=False, share_like_ratio_enabled=False)
+
+
+def test_cli_overrides_replace_loaded_share_rule_values() -> None:
+    config = ShareRuleConfig(
+        min_like_count=100,
+        min_share_count=200,
+        min_share_like_ratio=0.2,
+        threshold_mode="any",
+    )
+
+    overridden = config.with_overrides(
+        min_like_count=500,
+        min_share_count=800,
+        min_share_like_ratio=0.75,
+        threshold_mode="all",
+    )
+
+    assert overridden == ShareRuleConfig(
+        min_like_count=500,
+        min_share_count=800,
+        min_share_like_ratio=0.75,
+        threshold_mode="all",
+    )
