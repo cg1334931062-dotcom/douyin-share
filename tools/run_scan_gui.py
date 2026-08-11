@@ -45,6 +45,117 @@ FONT_VALUE = ("PingFang SC", 11)
 FONT_MONO = ("SF Mono", 11)
 
 
+def build_scan_command(
+    *,
+    python_executable: str,
+    runner: Path,
+    iterations: int,
+    profile_dir: str,
+    wait_scale: float,
+    live_wait: float,
+    video_wait: float,
+    post_next_settle: float,
+    snapshot_settle: float,
+    comment_style: str,
+    share_rules_config: Path,
+    share_min_like: int,
+    share_min_share: int,
+    share_min_ratio: float,
+    share_threshold_mode: str,
+    require_login: bool,
+    headless: bool,
+    no_log_window: bool,
+    comment_by_content: bool,
+    use_ai_comment: bool,
+    llm_api_base: str,
+    llm_model: str,
+    llm_api_key_env: str,
+    insecure_skip_verify: bool,
+    enable_share: bool,
+    share_target: str,
+    comment_without_share: bool,
+    enable_post: bool,
+    mention_friend: str,
+) -> list[str]:
+    """Build the runner command from validated GUI values.
+
+    Keeping command construction outside the Tk class makes the preview, copy,
+    and execution paths straightforward to regression-test without opening a
+    desktop window.
+    """
+    cmd = [
+        python_executable,
+        str(runner),
+        "--mode",
+        "scan",
+        "--iterations",
+        str(iterations),
+        "--profile-dir",
+        profile_dir or ".playwright_profile_main",
+        "--wait-scale",
+        str(wait_scale),
+        "--live-wait-seconds",
+        str(live_wait),
+        "--video-wait-seconds",
+        str(video_wait),
+        "--post-next-settle-seconds",
+        str(post_next_settle),
+        "--snapshot-settle-seconds",
+        str(snapshot_settle),
+        "--comment-style",
+        comment_style,
+        "--share-rules-config",
+        str(share_rules_config),
+        "--share-min-like-count",
+        str(share_min_like),
+        "--share-min-share-count",
+        str(share_min_share),
+        "--share-min-share-like-ratio",
+        str(share_min_ratio),
+        "--share-threshold-mode",
+        share_threshold_mode,
+    ]
+
+    if require_login:
+        cmd.append("--require-login")
+    if headless:
+        cmd.append("--headless")
+    if no_log_window:
+        cmd.append("--no-log-window")
+
+    if comment_by_content:
+        cmd.append("--comment-by-content")
+        if use_ai_comment:
+            cmd.extend(
+                [
+                    "--use-ai-comment",
+                    "--llm-api-base",
+                    llm_api_base or "https://api.deepseek.com/v1",
+                    "--llm-model",
+                    llm_model or "deepseek-chat",
+                    "--llm-api-key-env",
+                    llm_api_key_env or "DEEPSEEK_API_KEY",
+                ]
+            )
+            cmd.append("--llm-insecure-skip-verify" if insecure_skip_verify else "--llm-verify")
+        else:
+            cmd.append("--no-ai-comment")
+
+    if enable_share:
+        cmd.append("--enable-share")
+        normalized_target = " ".join(share_target.split()).strip()
+        if normalized_target:
+            cmd.extend(["--share-target", normalized_target])
+    if comment_without_share:
+        cmd.append("--comment-without-share")
+    if enable_post:
+        cmd.append("--enable-post")
+    if mention_friend:
+        cmd.extend(["--comment-mention-friend", mention_friend])
+
+    return cmd
+
+
 class ScanGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -903,71 +1014,7 @@ class ScanGui(tk.Tk):
         comment_by_content_enabled = self.comment_by_content_var.get() or mention_mode
         use_ai_enabled = self.use_ai_var.get() or mention_mode
 
-        cmd = [
-            sys.executable,
-            str(RUNNER),
-            "--mode",
-            "scan",
-            "--iterations",
-            str(int(iterations)),
-            "--profile-dir",
-            self.profile_dir_var.get().strip() or ".playwright_profile_main",
-            "--wait-scale",
-            str(wait_scale),
-            "--live-wait-seconds",
-            str(live_wait),
-            "--video-wait-seconds",
-            str(video_wait),
-            "--post-next-settle-seconds",
-            str(post_next_settle),
-            "--snapshot-settle-seconds",
-            str(snapshot_settle),
-            "--comment-style",
-            comment_style,
-            "--share-rules-config",
-            str(DEFAULT_SHARE_RULES_CONFIG),
-            "--share-min-like-count",
-            str(int(share_min_like)),
-            "--share-min-share-count",
-            str(int(share_min_share)),
-            "--share-min-share-like-ratio",
-            str(share_min_ratio),
-            "--share-threshold-mode",
-            share_threshold_mode,
-        ]
-
-        if self.require_login_var.get():
-            cmd.append("--require-login")
-        if self.headless_var.get():
-            cmd.append("--headless")
-        if self.no_log_window_var.get():
-            cmd.append("--no-log-window")
-
-        if comment_by_content_enabled:
-            cmd.append("--comment-by-content")
-            if use_ai_enabled:
-                cmd.append("--use-ai-comment")
-                cmd.extend(["--llm-api-base", self.llm_api_base_var.get().strip() or "https://api.deepseek.com/v1"])
-                cmd.extend(["--llm-model", self.llm_model_var.get().strip() or "deepseek-chat"])
-                cmd.extend(["--llm-api-key-env", self.llm_api_key_env_var.get().strip() or "DEEPSEEK_API_KEY"])
-                if self.insecure_skip_verify_var.get():
-                    cmd.append("--llm-insecure-skip-verify")
-                else:
-                    cmd.append("--llm-verify")
-            else:
-                cmd.append("--no-ai-comment")
-
-        if self.enable_share_var.get():
-            cmd.append("--enable-share")
-            target = " ".join(self.share_target_var.get().split()).strip()
-            if target:
-                cmd.extend(["--share-target", target])
-        if self.comment_without_share_var.get():
-            cmd.append("--comment-without-share")
-        if self.enable_post_var.get():
-            cmd.append("--enable-post")
         if mention_friend:
-            cmd.extend(["--comment-mention-friend", mention_friend])
             key_env = self.llm_api_key_env_var.get().strip() or "DEEPSEEK_API_KEY"
             resolved_key = self._resolve_api_key(
                 api_key_env=key_env,
@@ -978,7 +1025,37 @@ class ScanGui(tk.Tk):
                     f"设置评论@好友时，需提供可用的 AI Key（环境变量 {key_env}、项目 .env 的 DEEPSEEK_API_KEY，或明文）。"
                 )
 
-        return cmd
+        return build_scan_command(
+            python_executable=sys.executable,
+            runner=RUNNER,
+            iterations=int(iterations),
+            profile_dir=self.profile_dir_var.get().strip(),
+            wait_scale=wait_scale,
+            live_wait=live_wait,
+            video_wait=video_wait,
+            post_next_settle=post_next_settle,
+            snapshot_settle=snapshot_settle,
+            comment_style=comment_style,
+            share_rules_config=DEFAULT_SHARE_RULES_CONFIG,
+            share_min_like=int(share_min_like),
+            share_min_share=int(share_min_share),
+            share_min_ratio=share_min_ratio,
+            share_threshold_mode=share_threshold_mode,
+            require_login=self.require_login_var.get(),
+            headless=self.headless_var.get(),
+            no_log_window=self.no_log_window_var.get(),
+            comment_by_content=comment_by_content_enabled,
+            use_ai_comment=use_ai_enabled,
+            llm_api_base=self.llm_api_base_var.get().strip(),
+            llm_model=self.llm_model_var.get().strip(),
+            llm_api_key_env=self.llm_api_key_env_var.get().strip(),
+            insecure_skip_verify=self.insecure_skip_verify_var.get(),
+            enable_share=self.enable_share_var.get(),
+            share_target=self.share_target_var.get(),
+            comment_without_share=self.comment_without_share_var.get(),
+            enable_post=self.enable_post_var.get(),
+            mention_friend=mention_friend,
+        )
 
     def _copy_command(self) -> None:
         try:
