@@ -156,6 +156,22 @@ OPENAI_API_KEY='<YOUR_KEY>' PYTHONUNBUFFERED=1 python3 examples/run_real_site_on
 
 ## 8) Quick health checks
 
+### 8.0 M3 regression acceptance
+
+Run the complete offline suite from the repository root:
+
+```bash
+python3 -m pytest -q
+```
+
+This must pass before handing off a change. The suite is intentionally side-effect free: it does not open a real browser, call an LLM, post comments, or share content. It protects the critical safety contracts below:
+
+- Live and author-area ad-badge content are hard-blocked before comment, mention, or share actions.
+- Promo detections and failed engagement thresholds surface an explicit `share_result` and reason in runtime logs.
+- Default GUI command generation omits `--enable-share` and `--enable-post`; real side effects require explicit opt-in.
+- Share thresholds remain configurable through `configs/share_rules.toml` and documented CLI overrides.
+- README and this handoff retain the user-facing safe-default and offline-test guidance.
+
 ### 8.1 Is run still progressing?
 - Check runtime log window keeps appending new rounds.
 - Check terminal keeps printing `[round N]` and `[next]`.
