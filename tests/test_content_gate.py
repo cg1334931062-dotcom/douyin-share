@@ -10,6 +10,19 @@ def test_live_content_is_always_hard_blocked() -> None:
     assert decision.blocked
     assert decision.result == "skip_live"
     assert decision.task_status == "live_skipped"
+    assert "source=room_hint" in decision.detail
+
+
+def test_live_badge_is_also_a_hard_block() -> None:
+    decision = evaluate_hard_content_gate(
+        live_by_hint=False,
+        live_by_badge=True,
+        ad_badge=False,
+    )
+
+    assert decision.blocked
+    assert decision.result == "skip_live"
+    assert "source=live_badge" in decision.detail
 
 
 def test_live_hint_false_does_not_hard_block() -> None:
