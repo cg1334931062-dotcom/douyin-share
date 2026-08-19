@@ -31,6 +31,24 @@
 6. 视参数决定是否真实发送评论、是否真实执行分享给指定好友/群
 7. 输出每轮日志（含 `share_result`、`task_status`、互动指标等）
 
+## 2.1 AI/自动化代理入口（推荐）
+
+项目提供稳定的模块入口：
+
+```bash
+python3 -m douyin_agent --mode demo --iterations 1
+```
+
+该命令完全离线运行，并输出机器可读 JSON（`task_status`、`completed_rounds`、`skip_reasons`、`share_results`、`errors`）。它不需要登录，不访问抖音，也不会产生评论或分享副作用。
+
+真实站点必须显式选择 `scan`：
+
+```bash
+python3 -m douyin_agent --mode scan --iterations 5 --require-login
+```
+
+真实评论发送需要额外的 `--enable-post`，真实分享需要 `--enable-share --share-target <好友或群名>`；这两个开关默认关闭。完整的 AI 代理执行契约见 [AI_AGENT.md](AI_AGENT.md)。
+
 ## 3. 核心规则（2026-04 当前）
 
 ### 3.1 广告过滤规则
